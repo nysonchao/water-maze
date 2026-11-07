@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#06121c">
+<title>水珠迷宮</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;overflow:hidden;background:#04101a;color:#e6f4ff;
+    font-family:-apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif;
+    touch-action:none;user-select:none;-webkit-user-select:none;overscroll-behavior:none}
+  #app{position:fixed;inset:0;display:flex;flex-direction:column}
+  #hud{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:10px 14px 6px;font-variant-numeric:tabular-nums}
+  #hud .lv{font-weight:700;font-size:17px;letter-spacing:.04em}
+  #hud .time{margin-left:auto;font-size:15px;opacity:.85}
+  #meter{flex:0 0 auto;margin:0 14px 6px;height:8px;border-radius:5px;background:#0f2433;overflow:hidden;position:relative}
+  #meterFill{height:100%;width:0;background:linear-gradient(90deg,#3cc8ff,#9af0ff);border-radius:5px;transition:width .2s}
+  #meterGoal{position:absolute;top:-2px;bottom:-2px;width:2px;background:#ffd36b;left:75%}
+  #stageWrap{flex:1 1 auto;position:relative;perspective:900px;overflow:hidden}
+  #stage{position:absolute;inset:0;transform-style:preserve-3d;will-change:transform}
+  #gl,#fx{position:absolute;inset:0;width:100%;height:100%;display:block}
+  #bar{flex:0 0 auto;display:flex;gap:10px;justify-content:center;padding:8px 14px calc(12px + env(safe-area-inset-bottom))}
+  button{font:inherit;color:#e6f4ff;background:#11293a;border:1px solid #23506b;border-radius:12px;padding:9px 16px;font-size:15px}
+  button:active{transform:scale(.97);background:#173548}
+  button.primary{background:linear-gradient(180deg,#2bb8f0,#1478b8);border-color:#5fd2ff;font-weight:700;padding:13px 30px;font-size:18px}
+  #mode{font-size:12px;opacity:.6;align-self:center}
+  .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(2,10,16,.72);
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:10;padding:24px}
+  .overlay.hidden{display:none}
+  .card{max-width:360px;width:100%;text-align:center;background:linear-gradient(180deg,#0e2232,#091824);border:1px solid #1f4a63;
+    border-radius:22px;padding:28px 22px 24px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .card h1{margin:4px 0 8px;font-size:30px;letter-spacing:.08em}
+  .card h2{margin:4px 0 10px;font-size:24px}
+  .card p{margin:8px 0;line-height:1.6;opacity:.85;font-size:15px}
+  .card .small{font-size:12.5px;opacity:.6}
+  .drop{width:74px;height:74px;margin:0 auto 6px;border-radius:50% 50% 50% 50%/55% 55% 45% 45%;
+    background:radial-gradient(circle at 34% 30%,#fff 0 6%,#bff1ff 10%,#3ab8ef 46%,#0c5f96 80%);
+    box-shadow:0 14px 26px rgba(0,120,200,.35),inset -6px -10px 18px rgba(0,40,80,.45)}
+  #toast{position:fixed;left:50%;top:84px;transform:translateX(-50%);background:#0f2a3cee;border:1px solid #2a6488;
+    padding:9px 14px;border-radius:12px;font-size:13.5px;z-index:5;opacity:0;transition:opacity .4s;pointer-events:none;max-width:88vw;text-align:center}
+  #toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="hud"><span class="lv" id="lv">第 1 關</span><span id="pct">0%</span><span class="time" id="time">0.0 秒</span></div>
+  <div id="meter"><div id="meterFill"></div><div id="meterGoal"></div></div>
+  <div id="stageWrap"><div id="stage"><canvas id="gl"></canvas><canvas id="fx"></canvas></div></div>
+  <div id="bar"><button id="btnSensor">啟用傾斜</button><button id="btnCal">校準水平</button><button id="btnRestart">重來</button><span id="mode">—</span></div>
+</div>
+<div id="toast"></div>
+
+<div class="overlay" id="ovStart"><div class="card">
+  <div class="drop"></div>
+  <h1>水珠迷宮</h1>
+  <p>傾斜手機，讓水珠流向迷宮的<b style="color:#ffd36b">金色出口</b>。<br>水會分裂、也會重新融合——<br>收集 75% 的水就過關。</p>
+  <p class="small">沒有傾斜感應時：用手指在畫面上拖曳來「傾斜」，電腦可用方向鍵。</p>
+  <div style="height:10px"></div>
+  <button class="primary" id="btnStart">開始</button>
+</div></div>
+
+<div class="overlay hidden" id="ovWin"><div class="card">
+  <div class="drop"></div>
+  <h2 id="winTitle">過關！</h2>
+  <p id="winText"></p>
+  <div style="height:8px"></div>
+  <button class="primary" id="btnNext">下一關</button>
+  <div style="height:10px"></div>
+  <button id="btnAgain">再玩一次這關</button>
+</div></div>
+
+<script>
+// Particle-based viscoelastic fluid (Clavet et al. 2005, double density relaxation)
+// Units: 1 = one maze cell. Time step = 1 substep.
+function createSim(o){
+  const N=o.n, h=o.h, h2=h*h, pr=o.pr;
+  const rho0=o.rho0, k=o.k, kn=o.kn, sig=o.sig, beta=o.beta;
+  const W=o.W, H=o.H, kc=o.kc||0;
+  const x=new Float32Array(N), y=new Float32Array(N), px=new Float32Array(N), py=new Float32Array(N);
+  const vx=new Float32Array(N), vy=new Float32Array(N), alive=new Uint8Array(N);
+  const gw=Math.ceil(W/h)+1, gh=Math.ceil(H/h)+1;
+  const head=new Int32Array(gw*gh), next=new Int32Array(N);
+  const nb=new Int32Array(N*64), nbc=new Int32Array(N);
+  const rects=o.rects; // [x0,y0,x1,y1] arrays
+  // bucket rects per maze cell
+  const buckets=[];
+  for(let cy=0;cy<H;cy++)for(let cx=0;cx<W;cx++){
+    const b=[];
+    for(const r of rects){ if(r[2]>cx-0.3&&r[0]<cx+1.3&&r[3]>cy-0.3&&r[1]<cy+1.3) b.push(r); }
+    buckets.push(b);
+  }
+  function reset(sx,sy,rad){
+    let i=0;
+    const sp=0.085;
+    for(let a=0;i<N&&a<10000;a++){
+      // sunflower packing
+      const r=Math.sqrt(a+0.5)*sp*0.62, t=a*2.39996;
+      x[i]=sx+Math.cos(t)*r; y[i]=sy+Math.sin(t)*r; px[i]=x[i];py[i]=y[i];vx[i]=0;vy[i]=0;alive[i]=1;i++;
+    }
+  }
+  function grid(){
+    head.fill(-1);
+    for(let i=0;i<N;i++){ if(!alive[i])continue;
+      let cx=(x[i]/h)|0, cy=(y[i]/h)|0; if(cx<0)cx=0;if(cy<0)cy=0;if(cx>=gw)cx=gw-1;if(cy>=gh)cy=gh-1;
+      const c=cy*gw+cx; next[i]=head[c]; head[c]=i; }
+    // neighbor lists (j>i)
+    for(let i=0;i<N;i++){ nbc[i]=0; if(!alive[i])continue;
+      const cx=(x[i]/h)|0, cy=(y[i]/h)|0;
+      for(let oy=-1;oy<=1;oy++)for(let ox=-1;ox<=1;ox++){
+        const gx=cx+ox, gy=cy+oy; if(gx<0||gy<0||gx>=gw||gy>=gh)continue;
+        for(let j=head[gy*gw+gx];j!==-1;j=next[j]){ if(j<=i)continue;
+          const dx=x[j]-x[i], dy=y[j]-y[i]; if(dx*dx+dy*dy<h2 && nbc[i]<64){ nb[i*64+nbc[i]++]=j; } }
+      }
+    }
+  }
+  function collide(i){
+    let cx=Math.floor(x[i]), cy=Math.floor(y[i]);
+    if(cx<0)cx=0;if(cy<0)cy=0;if(cx>=W)cx=W-1;if(cy>=H)cy=H-1;
+    const b=buckets[cy*W+cx];
+    for(let n=0;n<b.length;n++){ const r=b[n];
+      const qx=x[i]<r[0]?r[0]:(x[i]>r[2]?r[2]:x[i]);
+      const qy=y[i]<r[1]?r[1]:(y[i]>r[3]?r[3]:y[i]);
+      let dx=x[i]-qx, dy=y[i]-qy; const d2=dx*dx+dy*dy;
+      if(d2<pr*pr){
+        if(d2>1e-10){ const d=Math.sqrt(d2), nx=dx/d, ny=dy/d; x[i]=qx+nx*pr; y[i]=qy+ny*pr;
+          // friction: damp tangential motion a bit
+          const mx=x[i]-px[i], my=y[i]-py[i], vn=mx*nx+my*ny; const tx=mx-vn*nx, ty=my-vn*ny;
+          px[i]+=tx*0.04; py[i]+=ty*0.04;
+        } else { // center inside rect: push out along least penetration
+          const l=x[i]-r[0], rr=r[2]-x[i], t=y[i]-r[1], bb=r[3]-y[i]; const m=Math.min(l,rr,t,bb);
+          if(m===l)x[i]=r[0]-pr; else if(m===rr)x[i]=r[2]+pr; else if(m===t)y[i]=r[1]-pr; else y[i]=r[3]+pr; }
+      }
+    }
+    if(x[i]<pr)x[i]=pr; if(y[i]<pr)y[i]=pr; if(x[i]>W-pr)x[i]=W-pr; if(y[i]>H-pr)y[i]=H-pr;
+  }
+  const vmax=0.06;
+  function step(gx,gy){
+    grid();
+    for(let i=0;i<N;i++){ if(!alive[i])continue; vx[i]+=gx; vy[i]+=gy; }
+    // viscosity
+    for(let i=0;i<N;i++){ const c=nbc[i]; for(let m=0;m<c;m++){ const j=nb[i*64+m];
+      let dx=x[j]-x[i], dy=y[j]-y[i]; const r=Math.sqrt(dx*dx+dy*dy); if(r<1e-6)continue; dx/=r;dy/=r;
+      const q=r/h; const u=(vx[i]-vx[j])*dx+(vy[i]-vy[j])*dy;
+      if(u>0){ const I=(1-q)*(sig*u+beta*u*u)*0.5; vx[i]-=I*dx;vy[i]-=I*dy;vx[j]+=I*dx;vy[j]+=I*dy; } } }
+    for(let i=0;i<N;i++){ if(!alive[i])continue;
+      let sx=vx[i], sy=vy[i]; const s=Math.hypot(sx,sy); if(s>vmax){sx*=vmax/s;sy*=vmax/s;}
+      px[i]=x[i];py[i]=y[i]; x[i]+=sx; y[i]+=sy; }
+    // density relaxation (uses neighbor list built from previous positions — fine for small steps)
+    const rho=densTmp, rhon=densTmp2; rho.fill(0); rhon.fill(0);
+    for(let i=0;i<N;i++){ const c=nbc[i]; for(let m=0;m<c;m++){ const j=nb[i*64+m];
+      const dx=x[j]-x[i], dy=y[j]-y[i]; const r2=dx*dx+dy*dy; if(r2>=h2)continue; const q=1-Math.sqrt(r2)/h;
+      const q2=q*q, q3=q2*q; rho[i]+=q2;rho[j]+=q2;rhon[i]+=q3;rhon[j]+=q3; } }
+    for(let i=0;i<N;i++){ const c=nbc[i]; if(!c)continue;
+      const P=k*(rho[i]-rho0), Pn=kn*rhon[i];
+      for(let m=0;m<c;m++){ const j=nb[i*64+m];
+        let dx=x[j]-x[i], dy=y[j]-y[i]; const r=Math.sqrt(dx*dx+dy*dy); if(r>=h||r<1e-6)continue;
+        const q=1-r/h; const Pj=k*(rho[j]-rho0), Pnj=kn*rhon[j];
+        const D=((P+Pj)*0.5*q+(Pn+Pnj)*0.5*q*q - kc*q*(1-q))*0.5/r; dx*=D;dy*=D;
+        x[i]-=dx;y[i]-=dy;x[j]+=dx;y[j]+=dy; } }
+    for(let i=0;i<N;i++){ if(!alive[i])continue; collide(i);
+      vx[i]=(x[i]-px[i])*0.999; vy[i]=(y[i]-py[i])*0.999; }
+  }
+  const densTmp=new Float32Array(N), densTmp2=new Float32Array(N);
+  return {N,x,y,vx,vy,alive,reset,step};
+}
+
+
+</script>
+<script>
+(()=>{
+'use strict';
+const $=id=>document.getElementById(id);
+const glc=$('gl'), fxc=$('fx'), stage=$('stage'), wrap=$('stageWrap');
+const fx=fxc.getContext('2d');
+const toast=(t,ms=3200)=>{const e=$('toast');e.textContent=t;e.classList.add('show');clearTimeout(toast._t);toast._t=setTimeout(()=>e.classList.remove('show'),ms)};
+const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+
+/* ---------------- maze ---------------- */
+function makeMaze(W,H){
+  // walls[y][x] = {n,e,s,w}
+  const c=[];for(let y=0;y<H;y++){c.push([]);for(let x=0;x<W;x++)c[y].push({n:1,e:1,s:1,w:1,v:0});}
+  const st=[[0,0]];c[0][0].v=1;
+  while(st.length){
+    const [x,y]=st[st.length-1];const opts=[];
+    if(y>0&&!c[y-1][x].v)opts.push([x,y-1,'n','s']);
+    if(x<W-1&&!c[y][x+1].v)opts.push([x+1,y,'e','w']);
+    if(y<H-1&&!c[y+1][x].v)opts.push([x,y+1,'s','n']);
+    if(x>0&&!c[y][x-1].v)opts.push([x-1,y,'w','e']);
+    if(!opts.length){st.pop();continue;}
+    const o=opts[(Math.random()*opts.length)|0];
+    c[y][x][o[2]]=0;c[o[1]][o[0]][o[3]]=0;c[o[1]][o[0]].v=1;st.push([o[0],o[1]]);
+  }
+  // knock out a few extra walls → loops (more interesting fluid routing)
+  const extra=Math.floor(W*H*0.06);
+  for(let i=0;i<extra;i++){const x=(Math.random()*(W-1))|0,y=(Math.random()*H)|0;c[y][x].e=0;c[y][x+1].w=0;}
+  const t=0.16/2, rects=[];
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    if(c[y][x].n)rects.push([x-t,y-t,x+1+t,y+t]);
+    if(c[y][x].w)rects.push([x-t,y-t,x+t,y+1+t]);
+    if(y===H-1&&c[y][x].s)rects.push([x-t,H-t,x+1+t,H+t]);
+    if(x===W-1&&c[y][x].e)rects.push([W-t,y-t,W+t,y+1+t]);
+  }
+  return {W,H,cells:c,rects};
+}
+
+/* ---------------- WebGL ---------------- */
+const gl=glc.getContext('webgl',{antialias:false,alpha:false,premultipliedAlpha:false,preserveDrawingBuffer:false});
+if(!gl){document.body.innerHTML='<p style="padding:30px">此瀏覽器不支援 WebGL。</p>';return;}
+const extHF=gl.getExtension('OES_texture_half_float'); gl.getExtension('OES_texture_half_float_linear');
+gl.getExtension('EXT_color_buffer_half_float');
+function sh(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+function prog(vs,fs){const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));
+  const u={};const n=gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);for(let i=0;i<n;i++){const a=gl.getActiveUniform(p,i);u[a.name]=gl.getUniformLocation(p,a.name);}
+  return {p,u};}
+const splatP=prog(`
+attribute vec2 aPos; uniform vec2 uRes; uniform float uSize;
+void main(){ vec2 c=aPos/uRes*2.0-1.0; gl_Position=vec4(c.x,-c.y,0.,1.); gl_PointSize=uSize; }`,
+`precision mediump float; uniform float uPeak;
+void main(){ vec2 d=gl_PointCoord*2.0-1.0; float r2=dot(d,d); if(r2>1.0)discard;
+  float w=(1.0-r2); w=w*w*w; gl_FragColor=vec4(w*uPeak,0.,0.,1.); }`);
+const compP=prog(`
+attribute vec2 aPos; varying vec2 vUv; void main(){ vUv=aPos*0.5+0.5; gl_Position=vec4(aPos,0.,1.); }`,
+`precision highp float;
+varying vec2 vUv; uniform sampler2D uBg,uF; uniform vec2 uTex; uniform float uK,uThr,uRefr,uT; uniform vec2 uShadow;
+float F(vec2 u){ return texture2D(uF,u).r; }
+vec3 BG(vec2 u){ return texture2D(uBg,vec2(u.x,1.0-u.y)).rgb; }
+void main(){
+  vec2 uv=vUv; float v=F(uv);
+  float gx=F(uv+vec2(uTex.x,0.))-F(uv-vec2(uTex.x,0.));
+  float gy=F(uv+vec2(0.,uTex.y))-F(uv-vec2(0.,uTex.y));
+  float gx2=F(uv+vec2(uTex.x*2.5,0.))-F(uv-vec2(uTex.x*2.5,0.));
+  float gy2=F(uv+vec2(0.,uTex.y*2.5))-F(uv-vec2(0.,uTex.y*2.5));
+  vec2 g=(vec2(gx,gy)+vec2(gx2,gy2)*0.4)*uK;
+  // height profile: rounded dome from field
+  float e=clamp((v-uThr)/(uThr*2.2),0.,1.); float hgt=sqrt(e*(2.0-e));
+  vec3 n=normalize(vec3(-g*(1.0-0.55*hgt),1.0));
+  float mask=smoothstep(uThr-0.035,uThr+0.035,v);
+  vec3 base=BG(uv);
+  // contact shadow + soft cast shadow toward bottom-right
+  float s1=smoothstep(uThr*0.35,uThr*1.6,F(uv-uShadow));
+  float s0=smoothstep(uThr*0.6,uThr*1.2,F(uv-uShadow*0.35));
+  base*=1.0-0.42*max(s1*0.8,s0);
+  // caustic: light focused through the drop lands offset on floor
+  float cau=F(uv-uShadow*0.9+vec2(uTex.x,-uTex.y)*2.0);
+  float cr=smoothstep(uThr*1.4,uThr*3.0,cau)*(1.0-mask);
+  base+=vec3(0.35,0.75,0.95)*cr*0.35;
+  // refraction (magnify the floor seen through the drop)
+  vec2 off=-n.xy*uRefr*(0.35+0.65*hgt);
+  vec3 r=vec3(BG(uv+off*1.06).r,BG(uv+off).g,BG(uv+off*0.94).b);
+  vec3 water=r*vec3(0.62,0.86,1.0)+vec3(0.02,0.07,0.12);
+  // thickness absorption
+  water*=mix(1.0,0.82,hgt);
+  // fake environment reflection
+  float fres=pow(1.0-n.z,1.6);
+  vec3 env=mix(vec3(0.05,0.18,0.28),vec3(0.75,0.92,1.0),clamp(n.y*0.6+0.55,0.,1.));
+  water=mix(water,env,fres*0.55);
+  // lighting
+  vec3 L=normalize(vec3(-0.45,0.55,0.7)); vec3 H=normalize(L+vec3(0.,0.,1.));
+  float nh=max(dot(n,H),0.0);
+  water+=vec3(1.0)*pow(nh,90.0)*1.6 + vec3(0.7,0.9,1.0)*pow(nh,14.0)*0.18;
+  // rim light (bottom-right inner glow)
+  float rim=pow(clamp(dot(n.xy,vec2(0.7,-0.7)),0.,1.),2.0)*fres;
+  water+=vec3(0.3,0.75,1.0)*rim*0.45;
+  // dark edge line for definition
+  water*=1.0-0.35*smoothstep(0.35,0.0,hgt)*mask;
+  vec3 col=mix(base,water,mask);
+  gl_FragColor=vec4(col,1.0);
+}`);
+const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const pbuf=gl.createBuffer();
+const bgTex=gl.createTexture();
+function texParams(lin){gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,lin?gl.LINEAR:gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,lin?gl.LINEAR:gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);}
+let fTex=null,fFbo=null,fW=0,fH=0,useHalf=false;
+function makeField(w,h){
+  if(fTex){gl.deleteTexture(fTex);gl.deleteFramebuffer(fFbo);}
+  fW=w;fH=h;fTex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,fTex);texParams(true);
+  fFbo=gl.createFramebuffer();
+  const tryType=t=>{gl.bindTexture(gl.TEXTURE_2D,fTex);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,t,null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fFbo);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,fTex,0);
+    return gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;};
+  useHalf=!!extHF&&tryType(extHF.HALF_FLOAT_OES);
+  if(!useHalf)tryType(gl.UNSIGNED_BYTE);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+}
+const maxPt=gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]||64;
+
+/* ---------------- background art ---------------- */
+const bgc=document.createElement('canvas'), bg=bgc.getContext('2d');
+function drawBackground(){
+  const {W,H,rects}=maze; const w=bgc.width=glc.width, hh=bgc.height=glc.height;
+  const S=L.cell*dpr, ox=L.ox*dpr, oy=L.oy*dpr;
+  // floor
+  const g=bg.createRadialGradient(w*0.35,hh*0.3,10,w*0.5,hh*0.5,Math.max(w,hh)*0.8);
+  g.addColorStop(0,'#16384b');g.addColorStop(1,'#071622');bg.fillStyle=g;bg.fillRect(0,0,w,hh);
+  // tiles inside maze
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const k=((x+y)&1)?0.035:0.0; bg.fillStyle=`rgba(160,220,255,${0.03+k})`;bg.fillRect(ox+x*S,oy+y*S,S,S);
+    // fine grout lines
+    bg.strokeStyle='rgba(120,200,240,0.07)';bg.lineWidth=1;
+    for(let i=1;i<4;i++){bg.beginPath();bg.moveTo(ox+x*S+i*S/4,oy+y*S);bg.lineTo(ox+x*S+i*S/4,oy+(y+1)*S);bg.stroke();
+      bg.beginPath();bg.moveTo(ox+x*S,oy+y*S+i*S/4);bg.lineTo(ox+(x+1)*S,oy+y*S+i*S/4);bg.stroke();}
+  }
+  // speckle texture so refraction is visible
+  let seed=7;const rnd=()=>((seed=(seed*16807)%2147483647)/2147483647);
+  for(let i=0;i<W*H*40;i++){bg.fillStyle=`rgba(200,240,255,${rnd()*0.08})`;const r=rnd()*S*0.03+0.5;
+    bg.beginPath();bg.arc(ox+rnd()*W*S,oy+rnd()*H*S,r,0,7);bg.fill();}
+  // start marker
+  const sx=ox+0.5*S, sy=oy+0.5*S;
+  bg.strokeStyle='rgba(120,210,255,0.35)';bg.lineWidth=Math.max(1,S*0.03);bg.setLineDash([S*0.08,S*0.07]);
+  bg.beginPath();bg.arc(sx,sy,S*0.34,0,7);bg.stroke();bg.setLineDash([]);
+  // exit drain
+  const ex=ox+(W-0.5)*S, ey=oy+(H-0.5)*S;
+  const eg=bg.createRadialGradient(ex,ey,0,ex,ey,S*0.62);
+  eg.addColorStop(0,'#000');eg.addColorStop(0.32,'#1a1204');eg.addColorStop(0.5,'rgba(255,200,90,0.85)');eg.addColorStop(0.62,'rgba(255,190,80,0.25)');eg.addColorStop(1,'rgba(255,190,80,0)');
+  bg.fillStyle=eg;bg.beginPath();bg.arc(ex,ey,S*0.62,0,7);bg.fill();
+  bg.strokeStyle='rgba(255,230,160,0.9)';bg.lineWidth=Math.max(1.5,S*0.025);bg.beginPath();bg.arc(ex,ey,S*0.3,0,7);bg.stroke();
+  for(let a=0;a<8;a++){const an=a/8*Math.PI*2;bg.beginPath();bg.moveTo(ex+Math.cos(an)*S*0.1,ey+Math.sin(an)*S*0.1);bg.lineTo(ex+Math.cos(an)*S*0.27,ey+Math.sin(an)*S*0.27);
+    bg.strokeStyle='rgba(255,215,130,0.5)';bg.stroke();}
+  // walls: shadow → side face → top face
+  const d=S*0.10; // apparent wall height
+  const rr=(x0,y0,x1,y1,r)=>{bg.beginPath();bg.roundRect?bg.roundRect(x0,y0,x1-x0,y1-y0,r):bg.rect(x0,y0,x1-x0,y1-y0);};
+  bg.save();bg.shadowColor='rgba(0,0,0,0.55)';bg.shadowBlur=S*0.16;bg.shadowOffsetX=S*0.09;bg.shadowOffsetY=S*0.12;bg.fillStyle='#0b2130';
+  for(const r of rects){rr(ox+r[0]*S,oy+r[1]*S,ox+r[2]*S,oy+r[3]*S+d,S*0.05);bg.fill();}
+  bg.restore();
+  bg.fillStyle='#24485d';
+  for(const r of rects){rr(ox+r[0]*S,oy+r[1]*S+d*0.5,ox+r[2]*S,oy+r[3]*S+d,S*0.05);bg.fill();}
+  for(const r of rects){
+    const x0=ox+r[0]*S,y0=oy+r[1]*S-d*0.25,x1=ox+r[2]*S,y1=oy+r[3]*S-d*0.25;
+    const tg=bg.createLinearGradient(x0,y0,x1,y1);tg.addColorStop(0,'#bfe3f2');tg.addColorStop(1,'#7fb2c9');
+    bg.fillStyle=tg;rr(x0,y0,x1,y1,S*0.05);bg.fill();
+  }
+  bg.strokeStyle='rgba(255,255,255,0.55)';bg.lineWidth=Math.max(1,S*0.012);
+  for(const r of rects){const x0=ox+r[0]*S,y0=oy+r[1]*S-d*0.25,x1=ox+r[2]*S;bg.beginPath();bg.moveTo(x0+S*0.04,y0+1);bg.lineTo(x1-S*0.04,y0+1);bg.stroke();}
+  gl.bindTexture(gl.TEXTURE_2D,bgTex);texParams(true);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bgc);
+}
+
+/* ---------------- game state ---------------- */
+let dpr=1, L={cell:40,ox:0,oy:0,w:0,h:0}, maze=null, sim=null, level=1, N=130;
+let absorbed=0, t0=0, elapsed=0, running=false, won=false, ripples=[];
+const P={h:0.2,pr:0.04,rho0:4,k:0.006,kn:0.012,sig:0.2,beta:0.3,kc:0.01};
+
+function levelSize(lv){
+  const r=wrap.clientHeight/Math.max(1,wrap.clientWidth);
+  const W=Math.min(3+lv,10); const H=Math.max(W,Math.min(16,Math.round(W*r)));
+  return [W,H];
+}
+function layout(){
+  dpr=Math.min(window.devicePixelRatio||1,2);
+  const w=wrap.clientWidth,h=wrap.clientHeight;
+  for(const c of [glc,fxc]){c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);}
+  const pad=14;
+  const cell=Math.floor(Math.min((w-pad*2)/maze.W,(h-pad*2)/maze.H));
+  L={cell,ox:Math.round((w-cell*maze.W)/2),oy:Math.round((h-cell*maze.H)/2),w,h};
+  makeField(Math.max(2,Math.round(glc.width*0.5)),Math.max(2,Math.round(glc.height*0.5)));
+  drawBackground();
+}
+function startLevel(lv){
+  level=lv;const [W,H]=levelSize(lv);maze=makeMaze(W,H);
+  N=130;
+  sim=createSim(Object.assign({n:N,W,H,rects:maze.rects},P));
+  sim.reset(0.5,0.5);
+  // tighter spawn so the drop fits the start cell
+  for(let i=0;i<N;i++){sim.x[i]=0.5+(sim.x[i]-0.5)*0.62;sim.y[i]=0.5+(sim.y[i]-0.5)*0.62;}
+  absorbed=0;elapsed=0;won=false;ripples=[];running=true;
+  layout();
+  $('lv').textContent=`第 ${lv} 關`;updateHud();
+  $('ovWin').classList.add('hidden');
+}
+function updateHud(){
+  const p=Math.round(absorbed/N*100);$('pct').textContent=`水量 ${p}%`;
+  $('meterFill').style.width=p+'%';$('time').textContent=elapsed.toFixed(1)+' 秒';
+}
+
+/* ---------------- input ---------------- */
+const tilt={sx:0,sy:0,tx:0,ty:0,kx:0,ky:0};   // sensor, touch, keys
+let sensorOK=false, sensorSeen=false, base=null, lastOri=null, mode='touch';
+function screenAngle(){return (screen.orientation&&screen.orientation.angle)||window.orientation||0;}
+function onOri(e){
+  if(e.beta==null||e.gamma==null)return;
+  sensorSeen=true;
+  if(!sensorOK){sensorOK=true;setMode('tilt');}
+  lastOri={b:e.beta,g:e.gamma};
+  if(!base)base={b:Math.max(0,Math.min(55,e.beta)),g:0};
+  const rad=Math.PI/180, full=24*rad;
+  let ax=Math.sin((e.gamma-base.g)*rad)/Math.sin(full);
+  let ay=Math.sin((e.beta-base.b)*rad)/Math.sin(full);
+  const a=screenAngle()*rad, c=Math.cos(a), s=Math.sin(a);
+  const rx=ax*c+ay*s, ry=-ax*s+ay*c; // rotate into screen frame
+  tilt.sx=rx;tilt.sy=ry;
+}
+// devicemotion fallback: gravity vector straight from the accelerometer
+const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+let oriFresh=0, mBase=null, lastMot=null;
+function onMot(e){
+  const a=e.accelerationIncludingGravity; if(!a||a.x==null||a.y==null)return;
+  if(performance.now()-oriFresh<500)return; // orientation events are working; prefer them
+  sensorSeen=true; if(!sensorOK){sensorOK=true;setMode('tilt');}
+  // screen-space gravity (x right, y down), in units of g
+  let gx=-a.x/9.81, gy=a.y/9.81; if(isIOS){gx=-gx;gy=-gy;}
+  const ang=screenAngle()*Math.PI/180, c=Math.cos(ang), s=Math.sin(ang);
+  const rx=gx*c+gy*s, ry=-gx*s+gy*c;
+  lastMot={x:rx,y:ry};
+  if(!mBase)mBase={x:0,y:Math.max(0,Math.min(0.8,ry))};
+  const full=Math.sin(24*Math.PI/180);
+  tilt.sx=(rx-mBase.x)/full; tilt.sy=(ry-mBase.y)/full;
+}
+function setMode(m){mode=m;$('mode').textContent=m==='tilt'?'傾斜控制中':'拖曳控制';$('btnSensor').style.display=m==='tilt'?'none':'';}
+let permNote='';
+async function requestPerms(){
+  permNote='';
+  const ask=async(C)=>{ if(typeof C!=='undefined'&&typeof C.requestPermission==='function'){
+      try{const r=await C.requestPermission(); if(r!=='granted')permNote='denied';}catch(e){permNote='error';} } };
+  // iOS: request orientation first (synchronously inside the tap), then motion once granted
+  await ask(window.DeviceOrientationEvent);
+  if(!permNote) await ask(window.DeviceMotionEvent);
+}
+function sensorReason(){
+  if(!window.isSecureContext) return '網址不是 HTTPS（感應器只在 https:// 頁面開放）。請把檔案放到 HTTPS 網站上開啟。';
+  let framed=false; try{framed=window.self!==window.top;}catch(e){framed=true;}
+  if(framed) return '頁面被嵌在其他網頁的框架裡（例如 Claude 的預覽），瀏覽器不給感應器。請直接開啟遊戲網址。';
+  if(permNote==='denied') return '動作感應權限被拒絕。iPhone 請完全關閉 Safari 分頁後重開，再按「啟用傾斜」並選允許。';
+  if(!('DeviceOrientationEvent' in window)&&!('DeviceMotionEvent' in window)) return '這個瀏覽器不支援動作感應。';
+  return '沒有收到感應器資料。電腦沒有陀螺儀；手機請確認系統沒有關閉動作感應，或換 Chrome／Safari 試試。';
+}
+async function enableSensor(){
+  await requestPerms();
+  if(!enableSensor.bound){enableSensor.bound=true;
+    window.addEventListener('deviceorientation',e=>{if(e.beta!=null){oriFresh=performance.now();}onOri(e);});
+    window.addEventListener('devicemotion',onMot);}
+  setTimeout(()=>{if(!sensorSeen){setMode('touch');showReason();}},1500);
+}
+function showReason(){toast('偵測不到傾斜：'+sensorReason()+'　目前先用手指拖曳控制。',7000);}
+let drag=null;
+wrap.addEventListener('pointerdown',e=>{drag={id:e.pointerId,x:e.clientX,y:e.clientY,cx:e.clientX,cy:e.clientY};wrap.setPointerCapture(e.pointerId);});
+wrap.addEventListener('pointermove',e=>{if(!drag||e.pointerId!==drag.id)return;drag.cx=e.clientX;drag.cy=e.clientY;
+  const R=70;let dx=(drag.cx-drag.x)/R,dy=(drag.cy-drag.y)/R;const m=Math.hypot(dx,dy);if(m>1){dx/=m;dy/=m;}tilt.tx=dx;tilt.ty=dy;});
+const endDrag=e=>{if(drag&&e.pointerId===drag.id){drag=null;tilt.tx=0;tilt.ty=0;}};
+wrap.addEventListener('pointerup',endDrag);wrap.addEventListener('pointercancel',endDrag);
+const keys={};
+addEventListener('keydown',e=>{keys[e.key]=1;if(e.key.startsWith('Arrow'))e.preventDefault();});
+addEventListener('keyup',e=>{keys[e.key]=0;});
+let gsx=0,gsy=0;
+function gravity(dt){
+  tilt.kx=(keys.ArrowRight||keys.d?1:0)-(keys.ArrowLeft||keys.a?1:0);
+  tilt.ky=(keys.ArrowDown||keys.s?1:0)-(keys.ArrowUp||keys.w?1:0);
+  let x=tilt.sx+tilt.tx+tilt.kx, y=tilt.sy+tilt.ty+tilt.ky;
+  const m=Math.hypot(x,y);if(m>1){x/=m;y/=m;}
+  const a=1-Math.exp(-dt*14);gsx+=(x-gsx)*a;gsy+=(y-gsy)*a;
+  return [gsx,gsy];
+}
+
+/* ---------------- loop ---------------- */
+const SUB=1/180, G=24*SUB*SUB;
+let acc=0,last=performance.now(),parr=new Float32Array(N*2);
+function frame(now){
+  requestAnimationFrame(frame);
+  let dt=Math.min(0.05,(now-last)/1000);last=now;
+  if(!maze)return;
+  const [gx,gy]=gravity(dt);
+  // 3D stage tilt
+  stage.style.transform=`rotateX(${(-gy*7).toFixed(2)}deg) rotateY(${(gx*7).toFixed(2)}deg)`;
+  if(running&&!won){
+    acc+=dt;let n=0;
+    while(acc>=SUB&&n<8){sim.step(gx*G,gy*G);acc-=SUB;n++;absorb();}
+    if(n===8)acc=0;
+    elapsed+=dt;
+    if(absorbed/N>=0.75)win();
+    updateHudThrottled(now);
+  }
+  render(now);
+}
+let hudT=0;function updateHudThrottled(now){if(now-hudT>100){hudT=now;updateHud();}}
+function absorb(){
+  const ex=maze.W-0.5, ey=maze.H-0.5;
+  for(let i=0;i<N;i++){ if(!sim.alive[i])continue;
+    const dx=sim.x[i]-ex, dy=sim.y[i]-ey; if(dx*dx+dy*dy<0.3*0.3){ sim.alive[i]=0; absorbed++;
+      if(Math.random()<0.25)ripples.push({t:0});
+      if(absorbed%12===0){try{navigator.vibrate&&navigator.vibrate(8)}catch(e){}}
+    } }
+}
+function win(){
+  won=true;running=false;updateHud();
+  const key='waterMaze_best_'+level, best=parseFloat(store.get(key)||'0');
+  let txt=`用時 <b>${elapsed.toFixed(1)}</b> 秒，收集 ${Math.round(absorbed/N*100)}% 的水。`;
+  if(!best||elapsed<best){store.set(key,elapsed.toFixed(2));if(best)txt+='<br>🎉 刷新最佳紀錄！';}
+  else txt+=`<br>最佳紀錄 ${best.toFixed(1)} 秒`;
+  store.set('waterMaze_level',String(level+1));
+  $('winTitle').textContent=`第 ${level} 關 過關！`;$('winText').innerHTML=txt;
+  setTimeout(()=>$('ovWin').classList.remove('hidden'),500);
+}
+function render(now){
+  const S=L.cell*dpr*0.5, ox=L.ox*dpr*0.5, oy=L.oy*dpr*0.5;
+  // splat particles
+  if(parr.length<N*2)parr=new Float32Array(N*2);
+  let c=0;for(let i=0;i<N;i++){if(!sim.alive[i])continue;parr[c*2]=ox+sim.x[i]*S;parr[c*2+1]=oy+sim.y[i]*S;c++;}
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fFbo);gl.viewport(0,0,fW,fH);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  if(c){
+    gl.useProgram(splatP.p);gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);
+    gl.bindBuffer(gl.ARRAY_BUFFER,pbuf);gl.bufferData(gl.ARRAY_BUFFER,parr.subarray(0,c*2),gl.DYNAMIC_DRAW);
+    const loc=gl.getAttribLocation(splatP.p,'aPos');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+    gl.uniform2f(splatP.u.uRes,fW,fH);
+    const size=Math.min(maxPt,S*0.40);
+    gl.uniform1f(splatP.u.uSize,size);
+    gl.uniform1f(splatP.u.uPeak,useHalf?0.30:0.11);
+    gl.drawArrays(gl.POINTS,0,c);gl.disable(gl.BLEND);
+  }
+  // composite
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,glc.width,glc.height);
+  gl.useProgram(compP.p);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,bgTex);gl.uniform1i(compP.u.uBg,0);
+  gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,fTex);gl.uniform1i(compP.u.uF,1);
+  gl.uniform2f(compP.u.uTex,1/fW,1/fH);
+  const thr=useHalf?0.55:0.30;
+  gl.uniform1f(compP.u.uThr,thr);
+  gl.uniform1f(compP.u.uK,(useHalf?1.1:2.6)*Math.max(1,S*0.04));
+  gl.uniform1f(compP.u.uRefr,0.045*S/Math.max(fW,fH)*6);
+  gl.uniform2f(compP.u.uShadow,S*0.10/fW,-S*0.13/fH);
+  gl.uniform1f(compP.u.uT,now/1000);
+  gl.bindBuffer(gl.ARRAY_BUFFER,quad);const ql=gl.getAttribLocation(compP.p,'aPos');gl.enableVertexAttribArray(ql);gl.vertexAttribPointer(ql,2,gl.FLOAT,false,0,0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  drawFx(now);
+}
+function drawFx(now){
+  const w=fxc.width,h=fxc.height;fx.clearRect(0,0,w,h);
+  const S=L.cell*dpr, ex=(L.ox+(maze.W-0.5)*L.cell)*dpr, ey=(L.oy+(maze.H-0.5)*L.cell)*dpr;
+  // pulsing exit glow
+  const p=0.5+0.5*Math.sin(now/300);
+  fx.strokeStyle=`rgba(255,215,120,${0.25+0.25*p})`;fx.lineWidth=S*0.03;fx.beginPath();fx.arc(ex,ey,S*(0.36+0.04*p),0,7);fx.stroke();
+  for(let i=ripples.length-1;i>=0;i--){const r=ripples[i];r.t+=1/60;if(r.t>0.8){ripples.splice(i,1);continue;}
+    fx.strokeStyle=`rgba(160,230,255,${0.7*(1-r.t/0.8)})`;fx.lineWidth=S*0.02;fx.beginPath();fx.arc(ex,ey,S*(0.12+r.t*0.45),0,7);fx.stroke();}
+  // touch joystick
+  if(drag){const x=drag.x*dpr,y=drag.y*dpr,R=70*dpr;
+    fx.strokeStyle='rgba(180,230,255,0.35)';fx.lineWidth=2*dpr;fx.beginPath();fx.arc(x,y,R,0,7);fx.stroke();
+    fx.fillStyle='rgba(180,230,255,0.35)';fx.beginPath();fx.arc(x+tilt.tx*R,y+tilt.ty*R,16*dpr,0,7);fx.fill();}
+  // gravity arrow (top-right)
+  const m=Math.hypot(gsx,gsy);
+  if(m>0.05){const cx=w-34*dpr,cy=26*dpr;fx.save();fx.translate(cx,cy);fx.rotate(Math.atan2(gsy,gsx));
+    fx.fillStyle=`rgba(150,220,255,${0.3+0.5*m})`;const l=(8+14*m)*dpr;
+    fx.beginPath();fx.moveTo(l,0);fx.lineTo(l-8*dpr,-6*dpr);fx.lineTo(l-8*dpr,6*dpr);fx.closePath();fx.fill();
+    fx.fillRect(-4*dpr,-2*dpr,l-8*dpr,4*dpr);fx.restore();}
+}
+
+/* ---------------- buttons ---------------- */
+$('btnStart').onclick=async()=>{
+  $('ovStart').classList.add('hidden');
+  await enableSensor();
+  const saved=parseInt(store.get('waterMaze_level')||'1',10);
+  startLevel(Math.max(1,Math.min(saved,30)));
+};
+$('btnNext').onclick=()=>startLevel(level+1);
+$('btnAgain').onclick=()=>startLevel(level);
+$('btnRestart').onclick=()=>startLevel(level);
+$('btnCal').onclick=()=>{ if(lastOri||lastMot){ if(lastOri)base={b:lastOri.b,g:lastOri.g}; if(lastMot)mBase={x:lastMot.x,y:lastMot.y}; toast('已將目前角度設為水平');} else showReason(); };
+$('btnSensor').onclick=async()=>{ sensorSeen=false; await enableSensor(); };
+addEventListener('resize',()=>{if(maze)layout();});
+document.addEventListener('visibilitychange',()=>{last=performance.now();acc=0;});
+
+// idle preview behind start screen
+setMode('touch');
+startLevel(1);running=false;
+requestAnimationFrame(frame);
+window.__game={startLevel,get sim(){return sim},tilt,get absorbed(){return absorbed},get useHalf(){return useHalf}};
+})();
+</script>
+</body>
+</html>

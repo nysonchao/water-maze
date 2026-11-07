@@ -13,9 +13,11 @@
   #app{position:fixed;inset:0;display:flex;flex-direction:column}
   #hud{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:10px 14px 6px;font-variant-numeric:tabular-nums}
   #hud .lv{font-weight:700;font-size:17px;letter-spacing:.04em}
+  #pct{font-size:14px;opacity:.9}
   #hud .time{margin-left:auto;font-size:15px;opacity:.85}
   #meter{flex:0 0 auto;margin:0 14px 6px;height:8px;border-radius:5px;background:#0f2433;overflow:hidden;position:relative}
   #meterFill{height:100%;width:0;background:linear-gradient(90deg,#3cc8ff,#9af0ff);border-radius:5px;transition:width .2s}
+  #meterLost{position:absolute;right:0;top:0;bottom:0;width:0;background:repeating-linear-gradient(45deg,#7a5a1a 0 4px,#4d3810 4px 8px)}
   #meterGoal{position:absolute;top:-2px;bottom:-2px;width:2px;background:#ffd36b;left:75%}
   #stageWrap{flex:1 1 auto;position:relative;perspective:900px;overflow:hidden}
   #stage{position:absolute;inset:0;transform-style:preserve-3d;will-change:transform}
@@ -45,7 +47,7 @@
 <body>
 <div id="app">
   <div id="hud"><span class="lv" id="lv">第 1 關</span><span id="pct">0%</span><span class="time" id="time">0.0 秒</span></div>
-  <div id="meter"><div id="meterFill"></div><div id="meterGoal"></div></div>
+  <div id="meter"><div id="meterFill"></div><div id="meterLost"></div><div id="meterGoal"></div></div>
   <div id="stageWrap"><div id="stage"><canvas id="gl"></canvas><canvas id="fx"></canvas></div></div>
   <div id="bar"><button id="btnSensor">啟用傾斜</button><button id="btnCal">校準水平</button><button id="btnRestart">重來</button><span id="mode">—</span></div>
 </div>
@@ -118,7 +120,7 @@ function createSim(o){
     let cx=Math.floor(x[i]), cy=Math.floor(y[i]);
     if(cx<0)cx=0;if(cy<0)cy=0;if(cx>=W)cx=W-1;if(cy>=H)cy=H-1;
     const b=buckets[cy*W+cx];
-    for(let n=0;n<b.length;n++){ const r=b[n];
+    for(let n=0;n<b.length;n++){ const r=b[n]; if(r.door&&r.door.open>0.5)continue;
       const qx=x[i]<r[0]?r[0]:(x[i]>r[2]?r[2]:x[i]);
       const qy=y[i]<r[1]?r[1]:(y[i]>r[3]?r[3]:y[i]);
       let dx=x[i]-qx, dy=y[i]-qy; const d2=dx*dx+dy*dy;
@@ -194,14 +196,80 @@ function makeMaze(W,H){
   // knock out a few extra walls → loops (more interesting fluid routing)
   const extra=Math.floor(W*H*0.06);
   for(let i=0;i<extra;i++){const x=(Math.random()*(W-1))|0,y=(Math.random()*H)|0;c[y][x].e=0;c[y][x+1].w=0;}
-  const t=0.16/2, rects=[];
+  return {W,H,cells:c};
+}
+const DOORCOL=[{a:'#ffc061',b:'#d9741c',g:'255,184,80',name:'橘色'},{a:'#ff8ae0',b:'#b23b9c',g:'255,120,220',name:'粉色'}];
+const PLATE_K=16, SPONGE_CAP=16;
+const DIRS={n:[0,-1],e:[1,0],s:[0,1],w:[-1,0]};
+function ekey(x,y,d){ if(d==='w')return (x-1)+','+y+',e'; if(d==='n')return x+','+(y-1)+',s'; return x+','+y+','+d; }
+function bfs(m,blocked,sx,sy){
+  const {W,H,cells}=m; const dist=new Int32Array(W*H).fill(-1), par=new Int32Array(W*H).fill(-1);
+  const q=[sy*W+sx]; dist[q[0]]=0;
+  for(let h=0;h<q.length;h++){ const id=q[h],x=id%W,y=(id/W)|0;
+    for(const d in DIRS){ if(cells[y][x][d])continue; if(blocked&&blocked.has(ekey(x,y,d)))continue;
+      const nx=x+DIRS[d][0],ny=y+DIRS[d][1]; if(nx<0||ny<0||nx>=W||ny>=H)continue; const ni=ny*W+nx;
+      if(dist[ni]<0){dist[ni]=dist[id]+1;par[ni]=id;q.push(ni);} } }
+  return {dist,par};
+}
+function wallCount(m,x,y){const k=m.cells[y][x];return k.n+k.e+k.s+k.w;}
+function buildRects(m){
+  const {W,H,cells:c}=m; const t=0.08, rects=[];
   for(let y=0;y<H;y++)for(let x=0;x<W;x++){
     if(c[y][x].n)rects.push([x-t,y-t,x+1+t,y+t]);
     if(c[y][x].w)rects.push([x-t,y-t,x+t,y+1+t]);
     if(y===H-1&&c[y][x].s)rects.push([x-t,H-t,x+1+t,H+t]);
     if(x===W-1&&c[y][x].e)rects.push([W-t,y-t,W+t,y+1+t]);
   }
-  return {W,H,cells:c,rects};
+  for(const dr of m.doors){
+    const r=dr.d==='e'?[dr.x+1-t,dr.y-t,dr.x+1+t,dr.y+1+t]:[dr.x-t,dr.y+1-t,dr.x+1+t,dr.y+1+t];
+    r.door=dr; dr.rect=r; rects.push(r);
+  }
+  m.rects=rects;
+}
+function levelRules(lv){
+  const doors=lv>=6?2:(lv>=3?1:0);
+  const sponges=lv===2?1:(lv>=4?Math.min(3,1+((lv-4)>>1)):0);
+  return {doors,sponges};
+}
+function designLevel(lv){
+  const [W,H]=levelSize(lv); const R=levelRules(lv);
+  for(let tries=0;tries<80;tries++){
+    const m=makeMaze(W,H); const exitId=(H-1)*W+(W-1);
+    const {par}=bfs(m,null,0,0); const path=[]; for(let id=exitId;id!==-1;id=par[id])path.unshift(id);
+    const onPath=new Set(path);
+    const cands=[];
+    for(let i=Math.floor(path.length*0.3);i<Math.min(path.length-1,Math.ceil(path.length*0.85));i++){
+      const a=path[i],b=path[i+1]; const ax=a%W,ay=(a/W)|0,bx=b%W,by=(b/W)|0;
+      const d=bx>ax?'e':bx<ax?'w':by>ay?'s':'n'; const key=ekey(ax,ay,d);
+      if(bfs(m,new Set([key]),0,0).dist[exitId]<0)cands.push({i,key,ax,ay,d});
+    }
+    if(cands.length<R.doors)continue;
+    let chosen=[];
+    if(R.doors===1)chosen=[cands[(Math.random()*cands.length)|0]];
+    else if(R.doors===2){ const a=cands[(Math.random()*Math.max(1,cands.length*0.5))|0]; const rest=cands.filter(c=>c.i>=a.i+2); if(!rest.length)continue; chosen=[a,rest[(Math.random()*rest.length)|0]]; }
+    const used=new Set([0,exitId]); const doors=[]; let ok=true;
+    for(let k=0;k<chosen.length;k++){
+      const {dist}=bfs(m,new Set(chosen.slice(k).map(c=>c.key)),0,0);
+      let opts=[];
+      for(let id=0;id<W*H;id++){ if(dist[id]<2||used.has(id)||onPath.has(id))continue; if(wallCount(m,id%W,(id/W)|0)===3)opts.push(id); }
+      if(!opts.length)for(let id=0;id<W*H;id++){ if(dist[id]>=2&&!used.has(id)&&!onPath.has(id))opts.push(id); }
+      if(!opts.length){ok=false;break;}
+      const pid=opts[(Math.random()*opts.length)|0]; used.add(pid);
+      const c=chosen[k]; let x=c.ax,y=c.ay,d=c.d;
+      if(d==='w'){x-=1;d='e';} else if(d==='n'){y-=1;d='s';}
+      doors.push({x,y,d,px:pid%W,py:(pid/W)|0,open:0,count:0,col:DOORCOL[k],wasOpen:false});
+    }
+    if(!ok)continue;
+    const sponges=[]; const spC=path.filter((id,i)=>i>=2&&i<=path.length-2&&!used.has(id));
+    while(sponges.length<R.sponges&&spC.length){
+      const id=spC.splice((Math.random()*spC.length)|0,1)[0];
+      for(let q=spC.length-1;q>=0;q--){const o=spC[q];if(Math.abs(o%W-id%W)+Math.abs(((o/W)|0)-((id/W)|0))<=1)spC.splice(q,1);}
+      sponges.push({x:id%W,y:(id/W)|0,wet:0,cap:SPONGE_CAP}); used.add(id);
+    }
+    if(sponges.length<R.sponges&&tries<79)continue;
+    m.doors=doors;m.sponges=sponges;buildRects(m);return m;
+  }
+  const m=makeMaze(W,H);m.doors=[];m.sponges=[];buildRects(m);return m;
 }
 
 /* ---------------- WebGL ---------------- */
@@ -289,8 +357,10 @@ const maxPt=gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]||64;
 
 /* ---------------- background art ---------------- */
 const bgc=document.createElement('canvas'), bg=bgc.getContext('2d');
+const baseC=document.createElement('canvas'), wallC=document.createElement('canvas');
 function drawBackground(){
-  const {W,H,rects}=maze; const w=bgc.width=glc.width, hh=bgc.height=glc.height;
+  const {W,H,rects}=maze; const w=bgc.width=baseC.width=wallC.width=glc.width, hh=bgc.height=baseC.height=wallC.height=glc.height;
+  let bg=baseC.getContext('2d');
   const S=L.cell*dpr, ox=L.ox*dpr, oy=L.oy*dpr;
   // floor
   const g=bg.createRadialGradient(w*0.35,hh*0.3,10,w*0.5,hh*0.5,Math.max(w,hh)*0.8);
@@ -319,6 +389,28 @@ function drawBackground(){
   bg.strokeStyle='rgba(255,230,160,0.9)';bg.lineWidth=Math.max(1.5,S*0.025);bg.beginPath();bg.arc(ex,ey,S*0.3,0,7);bg.stroke();
   for(let a=0;a<8;a++){const an=a/8*Math.PI*2;bg.beginPath();bg.moveTo(ex+Math.cos(an)*S*0.1,ey+Math.sin(an)*S*0.1);bg.lineTo(ex+Math.cos(an)*S*0.27,ey+Math.sin(an)*S*0.27);
     bg.strokeStyle='rgba(255,215,130,0.5)';bg.stroke();}
+  // sponges (dry)
+  for(const sp of maze.sponges){
+    const x0=ox+(sp.x+0.07)*S,y0=oy+(sp.y+0.07)*S,sz=S*0.86;
+    const sg=bg.createLinearGradient(x0,y0,x0+sz,y0+sz);sg.addColorStop(0,'#f2d36b');sg.addColorStop(1,'#c99a35');
+    bg.fillStyle=sg;bg.beginPath();bg.roundRect?bg.roundRect(x0,y0,sz,sz,S*0.1):bg.rect(x0,y0,sz,sz);bg.fill();
+    for(let i=0;i<70;i++){const rx=x0+S*0.05+rnd()*(sz-S*0.1),ry=y0+S*0.05+rnd()*(sz-S*0.1),rr0=S*(0.012+rnd()*0.035);
+      bg.fillStyle=`rgba(110,70,15,${0.35+rnd()*0.35})`;bg.beginPath();bg.ellipse(rx,ry,rr0,rr0*(0.6+rnd()*0.4),rnd()*3,0,7);bg.fill();}
+    bg.strokeStyle='rgba(255,240,180,0.6)';bg.lineWidth=Math.max(1,S*0.015);bg.beginPath();bg.moveTo(x0+S*0.1,y0+2);bg.lineTo(x0+sz-S*0.1,y0+2);bg.stroke();
+  }
+  // door slots and plates
+  for(const dr of maze.doors){
+    const r=dr.rect; bg.fillStyle=`rgba(${dr.col.g},0.18)`;bg.fillRect(ox+r[0]*S,oy+r[1]*S,(r[2]-r[0])*S,(r[3]-r[1])*S);
+    bg.strokeStyle=`rgba(${dr.col.g},0.55)`;bg.setLineDash([S*0.05,S*0.05]);bg.lineWidth=Math.max(1,S*0.012);
+    bg.strokeRect(ox+r[0]*S,oy+r[1]*S,(r[2]-r[0])*S,(r[3]-r[1])*S);bg.setLineDash([]);
+    const cx=ox+(dr.px+0.5)*S,cy=oy+(dr.py+0.5)*S,R=S*0.32;
+    bg.save();bg.shadowColor='rgba(0,0,0,0.5)';bg.shadowBlur=S*0.08;bg.shadowOffsetX=S*0.03;bg.shadowOffsetY=S*0.05;
+    bg.fillStyle=dr.col.b;bg.beginPath();bg.arc(cx,cy,R,0,7);bg.fill();bg.restore();
+    const pg=bg.createRadialGradient(cx-R*0.3,cy-R*0.35,R*0.1,cx,cy,R*0.85);pg.addColorStop(0,'#f4f7fa');pg.addColorStop(1,'#7d8c99');
+    bg.fillStyle=pg;bg.beginPath();bg.arc(cx,cy,R*0.8,0,7);bg.fill();
+    bg.fillStyle=dr.col.a;bg.beginPath();bg.arc(cx,cy,R*0.28,0,7);bg.fill();
+  }
+  bg=wallC.getContext('2d');bg.clearRect(0,0,w,hh);
   // walls: shadow → side face → top face
   const d=S*0.10; // apparent wall height
   const rr=(x0,y0,x1,y1,r)=>{bg.beginPath();bg.roundRect?bg.roundRect(x0,y0,x1-x0,y1-y0,r):bg.rect(x0,y0,x1-x0,y1-y0);};
@@ -334,6 +426,18 @@ function drawBackground(){
   }
   bg.strokeStyle='rgba(255,255,255,0.55)';bg.lineWidth=Math.max(1,S*0.012);
   for(const r of rects){const x0=ox+r[0]*S,y0=oy+r[1]*S-d*0.25,x1=ox+r[2]*S;bg.beginPath();bg.moveTo(x0+S*0.04,y0+1);bg.lineTo(x1-S*0.04,y0+1);bg.stroke();}
+  composeBackground();
+}
+let bgDirty=false,bgT=0;
+function composeBackground(){
+  const S=L.cell*dpr, ox=L.ox*dpr, oy=L.oy*dpr;
+  bg.clearRect(0,0,bgc.width,bgc.height);bg.drawImage(baseC,0,0);
+  for(const sp of maze.sponges){ if(!sp.wet)continue; const f=sp.wet/sp.cap;
+    const x0=ox+(sp.x+0.07)*S,y0=oy+(sp.y+0.07)*S,sz=S*0.86;
+    bg.fillStyle=`rgba(25,60,100,${0.7*f})`;bg.beginPath();bg.roundRect?bg.roundRect(x0,y0,sz,sz,S*0.1):bg.rect(x0,y0,sz,sz);bg.fill();
+    if(f>=1){bg.fillStyle='rgba(160,220,255,0.5)';for(let i=0;i<6;i++){bg.beginPath();bg.arc(x0+sz*(0.2+0.6*((i*37)%10)/10),y0+sz*(0.2+0.6*((i*53)%10)/10),S*0.025,0,7);bg.fill();}}
+  }
+  bg.drawImage(wallC,0,0);
   gl.bindTexture(gl.TEXTURE_2D,bgTex);texParams(true);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
   gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bgc);
@@ -341,7 +445,7 @@ function drawBackground(){
 
 /* ---------------- game state ---------------- */
 let dpr=1, L={cell:40,ox:0,oy:0,w:0,h:0}, maze=null, sim=null, level=1, N=130;
-let absorbed=0, t0=0, elapsed=0, running=false, won=false, ripples=[];
+let absorbed=0, lost=0, need=0.75, t0=0, elapsed=0, running=false, won=false, ripples=[], spongeAt=null;
 const P={h:0.2,pr:0.04,rho0:4,k:0.006,kn:0.012,sig:0.2,beta:0.3,kc:0.01};
 
 function levelSize(lv){
@@ -360,20 +464,26 @@ function layout(){
   drawBackground();
 }
 function startLevel(lv){
-  level=lv;const [W,H]=levelSize(lv);maze=makeMaze(W,H);
-  N=130;
+  level=lv;maze=designLevel(lv);const W=maze.W,H=maze.H;
+  N=140;
+  need=Math.max(0.25,0.75-maze.doors.length*0.14-maze.sponges.length*0.06);
+  spongeAt=new Int8Array(W*H).fill(-1);maze.sponges.forEach((sp,i)=>spongeAt[sp.y*W+sp.x]=i);
   sim=createSim(Object.assign({n:N,W,H,rects:maze.rects},P));
   sim.reset(0.5,0.5);
   // tighter spawn so the drop fits the start cell
   for(let i=0;i<N;i++){sim.x[i]=0.5+(sim.x[i]-0.5)*0.62;sim.y[i]=0.5+(sim.y[i]-0.5)*0.62;}
-  absorbed=0;elapsed=0;won=false;ripples=[];running=true;
+  absorbed=0;lost=0;elapsed=0;won=false;ripples=[];running=true;
   layout();
   $('lv').textContent=`第 ${lv} 關`;updateHud();
   $('ovWin').classList.add('hidden');
+  const intro={2:'新機關：黃色海綿會吸水，吸飽就不再吸。快速通過，或先讓它吸飽！',
+    3:'新機關：在圓形按鈕上留住一些水，同色的門才會打開。把水珠分開吧！',
+    6:'兩組按鈕和門！先開橘色門，再想辦法開粉色門。'};
+  if(intro[lv])setTimeout(()=>toast(intro[lv],6000),300);
 }
 function updateHud(){
-  const p=Math.round(absorbed/N*100);$('pct').textContent=`水量 ${p}%`;
-  $('meterFill').style.width=p+'%';$('time').textContent=elapsed.toFixed(1)+' 秒';
+  const p=Math.round(absorbed/N*100);$('pct').textContent=`收集 ${p}% / 需 ${Math.round(need*100)}%`;
+  $('meterFill').style.width=p+'%';$('meterGoal').style.left=(need*100)+'%';$('meterLost').style.width=(lost/N*100)+'%';$('time').textContent=elapsed.toFixed(1)+' 秒';
 }
 
 /* ---------------- input ---------------- */
@@ -469,15 +579,36 @@ function frame(now){
     while(acc>=SUB&&n<8){sim.step(gx*G,gy*G);acc-=SUB;n++;absorb();}
     if(n===8)acc=0;
     elapsed+=dt;
-    if(absorbed/N>=0.75)win();
+    mechanics(dt,now);
+    if(absorbed>=Math.ceil(need*N))win();
+    else if(absorbed+(N-absorbed-lost)<Math.ceil(need*N))lose();
     updateHudThrottled(now);
   }
   render(now);
 }
+function mechanics(dt,now){
+  for(const dr of maze.doors){
+    let c=0;const x0=dr.px+0.06,x1=dr.px+0.94,y0=dr.py+0.06,y1=dr.py+0.94;
+    for(let i=0;i<N;i++){ if(sim.alive[i]&&sim.x[i]>x0&&sim.x[i]<x1&&sim.y[i]>y0&&sim.y[i]<y1)c++; }
+    dr.count=c; const tgt=c>=PLATE_K?1:0; const sp=tgt>dr.open?3.5:1.6;
+    dr.open+=Math.sign(tgt-dr.open)*Math.min(Math.abs(tgt-dr.open),sp*dt);
+    const isOpen=dr.open>0.5; if(isOpen!==dr.wasOpen){dr.wasOpen=isOpen;try{navigator.vibrate&&navigator.vibrate(isOpen?[15,40,15]:20)}catch(e){}}
+  }
+  if(bgDirty&&now-bgT>120){bgDirty=false;bgT=now;composeBackground();}
+}
+function lose(){
+  won=true;running=false;updateHud();
+  $('winTitle').textContent='水不夠了…';
+  $('winText').innerHTML=`海綿吸走了 ${Math.round(lost/N*100)}% 的水，剩下的不夠 ${Math.round(need*100)}% 的過關門檻。<br>試試更快通過海綿，或換條路線。`;
+  $('btnNext').style.display='none';$('btnAgain').textContent='再試一次';
+  setTimeout(()=>$('ovWin').classList.remove('hidden'),400);
+}
 let hudT=0;function updateHudThrottled(now){if(now-hudT>100){hudT=now;updateHud();}}
 function absorb(){
-  const ex=maze.W-0.5, ey=maze.H-0.5;
+  const ex=maze.W-0.5, ey=maze.H-0.5, W=maze.W;
   for(let i=0;i<N;i++){ if(!sim.alive[i])continue;
+    const si=spongeAt[(Math.floor(sim.y[i])|0)*W+(Math.floor(sim.x[i])|0)];
+    if(si>=0){const sp=maze.sponges[si]; if(sp.wet<sp.cap&&Math.random()<1.3/180){sim.alive[i]=0;lost++;sp.wet++;bgDirty=true;continue;}}
     const dx=sim.x[i]-ex, dy=sim.y[i]-ey; if(dx*dx+dy*dy<0.3*0.3){ sim.alive[i]=0; absorbed++;
       if(Math.random()<0.25)ripples.push({t:0});
       if(absorbed%12===0){try{navigator.vibrate&&navigator.vibrate(8)}catch(e){}}
@@ -486,11 +617,12 @@ function absorb(){
 function win(){
   won=true;running=false;updateHud();
   const key='waterMaze_best_'+level, best=parseFloat(store.get(key)||'0');
-  let txt=`用時 <b>${elapsed.toFixed(1)}</b> 秒，收集 ${Math.round(absorbed/N*100)}% 的水。`;
+  let txt=`用時 <b>${elapsed.toFixed(1)}</b> 秒，收集 ${Math.round(absorbed/N*100)}% 的水`+(lost?`（海綿吸走 ${Math.round(lost/N*100)}%）`:'')+'。';
   if(!best||elapsed<best){store.set(key,elapsed.toFixed(2));if(best)txt+='<br>🎉 刷新最佳紀錄！';}
   else txt+=`<br>最佳紀錄 ${best.toFixed(1)} 秒`;
   store.set('waterMaze_level',String(level+1));
   $('winTitle').textContent=`第 ${level} 關 過關！`;$('winText').innerHTML=txt;
+  $('btnNext').style.display='';$('btnAgain').textContent='再玩一次這關';
   setTimeout(()=>$('ovWin').classList.remove('hidden'),500);
 }
 function render(now){
@@ -531,6 +663,25 @@ function drawFx(now){
   // pulsing exit glow
   const p=0.5+0.5*Math.sin(now/300);
   fx.strokeStyle=`rgba(255,215,120,${0.25+0.25*p})`;fx.lineWidth=S*0.03;fx.beginPath();fx.arc(ex,ey,S*(0.36+0.04*p),0,7);fx.stroke();
+  const ox=L.ox*dpr, oy=L.oy*dpr;
+  for(const dr of maze.doors){
+    const cx=ox+(dr.px+0.5)*S,cy=oy+(dr.py+0.5)*S,R=S*0.4, f=Math.min(1,dr.count/PLATE_K);
+    fx.lineWidth=S*0.045;fx.lineCap='round';
+    fx.strokeStyle='rgba(0,0,0,0.25)';fx.beginPath();fx.arc(cx,cy,R,0,7);fx.stroke();
+    if(f>0){fx.strokeStyle=`rgba(${dr.col.g},${0.55+0.45*f})`;fx.beginPath();fx.arc(cx,cy,R,-Math.PI/2,-Math.PI/2+f*Math.PI*2);fx.stroke();}
+    if(dr.open>0.5){fx.strokeStyle=`rgba(${dr.col.g},${0.3+0.25*Math.sin(now/150)})`;fx.lineWidth=S*0.02;fx.beginPath();fx.arc(cx,cy,R*1.18,0,7);fx.stroke();}
+    fx.lineCap='butt';
+    // the door itself: sinks into the floor as it opens
+    const al=Math.max(0,1-dr.open/0.6); if(al<=0)continue;
+    const r=dr.rect,x0=ox+r[0]*S,y0=oy+r[1]*S,x1=ox+r[2]*S,y1=oy+r[3]*S,d=S*0.10*(1-dr.open);
+    fx.globalAlpha=al;
+    fx.fillStyle='rgba(0,0,0,0.45)';fx.fillRect(x0+S*0.05,y0+S*0.07,x1-x0,y1-y0+d);
+    fx.fillStyle=dr.col.b;fx.fillRect(x0,y0+d*0.5,x1-x0,y1-y0+d*0.5);
+    const g=fx.createLinearGradient(x0,y0,x1,y1);g.addColorStop(0,dr.col.a);g.addColorStop(1,dr.col.b);
+    fx.fillStyle=g;fx.fillRect(x0,y0-d*0.25,x1-x0,y1-y0);
+    fx.strokeStyle='rgba(255,255,255,0.6)';fx.lineWidth=Math.max(1,S*0.012);fx.strokeRect(x0+0.5,y0-d*0.25+0.5,x1-x0-1,y1-y0-1);
+    fx.globalAlpha=1;
+  }
   for(let i=ripples.length-1;i>=0;i--){const r=ripples[i];r.t+=1/60;if(r.t>0.8){ripples.splice(i,1);continue;}
     fx.strokeStyle=`rgba(160,230,255,${0.7*(1-r.t/0.8)})`;fx.lineWidth=S*0.02;fx.beginPath();fx.arc(ex,ey,S*(0.12+r.t*0.45),0,7);fx.stroke();}
   // touch joystick
@@ -564,7 +715,7 @@ document.addEventListener('visibilitychange',()=>{last=performance.now();acc=0;}
 setMode('touch');
 startLevel(1);running=false;
 requestAnimationFrame(frame);
-window.__game={startLevel,get sim(){return sim},tilt,get absorbed(){return absorbed},get useHalf(){return useHalf}};
+window.__game={startLevel,get maze(){return maze},get sim(){return sim},tilt,get absorbed(){return absorbed},get useHalf(){return useHalf}};
 })();
 </script>
 </body>
